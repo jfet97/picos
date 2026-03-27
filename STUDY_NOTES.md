@@ -251,6 +251,57 @@ dune-project
 
 ---
 
+## Picos core: the four primitives
+
+Picos has exactly four core modules. Everything else (`picos_std.*`, `picos_mux.*`, `picos_io.*`) is built on top of them.
+
+- **Trigger** — one-shot "wake me up" signal. Create it, put it somewhere, `await` it. Someone else calls `signal` → you wake up.
+- **Computation** — result container for a fiber's work. Finishes via `try_return value` (success) or `try_cancel exn` (canceled). Triggers can be attached — when the computation finishes, all attached triggers fire.
+- **Fiber** — an independent thread of execution. Has exactly one Computation at any time. Can `forbid`/`permit` cancellation (deferred cancellation: the computation gets marked as canceled, but the fiber doesn't notice until it leaves the `forbid` section).
+- **Handler** — how schedulers install themselves. Contains the effect handler that catches the 5 effects.
+
+### The five effects (defined in `intf.ocaml5.ml`)
+
+```
+Trigger.Await          : trigger → (exn * bt) option    "suspend me until signaled"
+Computation.Cancel_after : {seconds, exn, computation}  "cancel after timeout"
+Fiber.Current          : fiber                           "give me the current fiber"
+Fiber.Yield            : unit                            "let others run"
+Fiber.Spawn            : {fiber, main}                   "create a new fiber"
+```
+
+Declared as `private` extensible effects — only picos can create them, any scheduler can pattern match on them.
+
+`intf.ocaml5.ml` also provides `Fiber.continue_with` / `Fiber.resume_with` — helpers that check cancellation before resuming a fiber, so schedulers don't have to do it manually.
+
+### Why shallow handlers, not deep
+
+Picos uses `Effect.Shallow` exclusively. The difference:
+
+- **Deep** — handler installed once, catches every effect for the fiber's lifetime. Baked into the continuation.
+- **Shallow** — handler catches ONE effect, then you must re-install for the next one. The continuation is "naked" — no handler attached.
+
+Picos uses shallow because fibers can **move between schedulers**. When a fiber is suspended, its continuation `k` is just a value in memory. Whoever picks it up and calls `continue_with k value their_handler` becomes the new scheduler:
+
+```
+Scheduler A running fiber F:
+  1. F does Await → A's handler catches it
+  2. A saves continuation k_F (e.g., attaches to a trigger)
+  3. A goes back to its run loop
+
+  ... trigger gets signaled by something on Scheduler B's side ...
+
+  4. Signal callback puts k_F into B's ready queue
+  5. B pops k_F, calls: continue_with k_F value handler_B
+  6. F resumes under B's handler
+```
+
+Between steps 3 and 5, the fiber belongs to nobody — it's a suspended continuation sitting in memory. With deep handlers, `k_F` would carry handler_A permanently, making the swap impossible.
+
+In practice, most fibers stay on one scheduler. But shallow handlers make the design **open** — which is the whole point of picos as an interop layer.
+
+---
+
 ## OCaml 5 concurrency model
 
 ### Domains vs Threads vs Fibers
