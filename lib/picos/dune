@@ -1,4 +1,10 @@
+;; ==========================================================================
 ;; Picos for OCaml 5
+;; ==========================================================================
+;;
+;; on OCaml 5+, picos.ml is just a copy of picos.ocaml5.ml.
+;; the (echo "# 1 ...") prepends a line directive so that compiler errors
+;; point back to the original file rather than the generated picos.ml.
 
 (rule
  (enabled_if
@@ -10,14 +16,25 @@
     (echo "# 1 \"lib/picos/picos.ocaml5.ml\"\n")
     (cat picos.ocaml5.ml)))))
 
-;; Picos for OCaml 4
+;; ==========================================================================
+;; Picos for OCaml 4 (you can ignore this section)
+;; ==========================================================================
+;;
+;; on OCaml 4, there are no effect handlers, so the code needs to be
+;; transformed. a small code generator reads picos.ocaml5.ml, extracts
+;; sections delimited by (* BEGIN ... *) / (* END ... *) markers, and
+;; replaces them with OCaml 4-specific implementations from the .ocaml4.ml
+;; files. the result is written to picos.ml.
 
+;; step 1: build the code generator executable (only on OCaml 4)
 (executable
  (enabled_if
   (< %{ocaml_version} 5.0.0))
  (name generate_picos_ml_for_ocaml_4)
  (modules generate_picos_ml_for_ocaml_4))
 
+;; step 2: run the generator to produce picos.ml from the OCaml 5 source
+;; plus the OCaml 4 replacement files
 (rule
  (enabled_if
   (< %{ocaml_version} 5.0.0))
@@ -33,8 +50,13 @@
    picos.ml
    (run ./generate_picos_ml_for_ocaml_4.exe))))
 
-;;
+;; ==========================================================================
 
+;; dummy library with no modules (modules = empty), only exists on OCaml 4.
+;; its sole purpose is to re-export picos.thread so that the (select ...)
+;; stanza below can detect OCaml 4 by checking if this library is available.
+;; on OCaml 5 this library doesn't exist, so the select falls through to
+;; the default branch (intf.ocaml5.ml).
 (library
  (name picos_thread_ocaml4)
  (package picos)
@@ -43,6 +65,23 @@
   (< %{ocaml_version} 5.0.0))
  (libraries
   (re_export picos.thread)))
+
+;; ==========================================================================
+;; The actual picos library
+;; ==========================================================================
+;;
+;; this is what users depend on: (libraries picos)
+;;
+;; it only has two modules: Picos (the generated picos.ml) and Intf.
+;;
+;; the (select ...) stanza picks the right intf.ml:
+;;   - if picos_thread_ocaml4 exists (OCaml 4) → use intf.ocaml4.ml
+;;     (minimal stubs, no effect type definitions)
+;;   - otherwise (OCaml 5) → use intf.ocaml5.ml
+;;     (full effect handler type definitions)
+;;
+;; the (-> intf.ocaml5.ml) line is the default/fallback branch — the bare
+;; arrow with no library name means "if none of the above matched".
 
 (library
  (name picos)
@@ -56,6 +95,16 @@
    (picos_thread_ocaml4 -> intf.ocaml4.ml)
    (-> intf.ocaml5.ml))))
 
+;; ==========================================================================
+;; MDX tests for picos.mli
+;; ==========================================================================
+;;
+;; mdx compiles and runs OCaml code blocks inside picos.mli as tests.
+;; two versions: one for OCaml 4 (uses thread scheduler), one for OCaml 5
+;; (uses random scheduler). this ensures the documentation examples actually
+;; work on both compiler versions.
+
+;; OCaml 4.14 - 4.x: test with picos_mux.thread (only scheduler on OCaml 4)
 (mdx
  (package picos_meta)
  (enabled_if
@@ -65,6 +114,7 @@
  (libraries picos picos_mux.thread picos_std.structured)
  (files picos.mli))
 
+;; OCaml 5+: test with picos_mux.random (work-stealing scheduler)
 (mdx
  (package picos_meta)
  (enabled_if
@@ -72,6 +122,7 @@
  (libraries picos picos_mux.random picos_std.structured)
  (files picos.mli))
 
+;; odoc documentation entry point
 (documentation
  (package picos)
  (mld_files index))
