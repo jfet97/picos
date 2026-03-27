@@ -208,6 +208,24 @@ Work like libraries but produce `.exe` files. `(package ...)` tells dune which o
 
 Some directories don't define a library — they just host odoc documentation entry points (`.mld` files). `lib/picos_aux/` and `lib/picos_std/` are like this.
 
+### Why split one package into many directories/libraries?
+
+Dune forces one library per directory. But the real reason for the split is **granular dependencies**.
+
+If `picos_std` were one monolithic library, anyone who just needs `Mutex` would also pull in `Event`, `Bundle`, `Promise`, `Awaitable`, and all their transitive deps. By splitting into separate libraries:
+
+```
+picos_std.awaitable  → depends on picos only
+picos_std.event      → depends on picos_std.awaitable
+picos_std.finally    → depends on picos only
+picos_std.sync       → depends on picos_std.awaitable, picos_std.event
+picos_std.structured → depends on picos_std.finally, picos_std.sync
+```
+
+Users only pay for what they use. Changing `event.ml` doesn't recompile `finally`. Circular deps are impossible (dune enforces acyclicity between libraries). Same reasoning as `@angular/core` vs `@angular/forms` vs `@angular/router` in npm.
+
+Directories without a dot (`picos_std/`, `picos_mux/`) are just odoc landing pages — no library code.
+
 ### Full picture of the project layout
 
 ```
