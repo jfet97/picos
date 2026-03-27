@@ -79,6 +79,20 @@ Everything else in the directory is invisible to the compiler — those files ar
 
 Also useful: **`(private_modules <modules>)`** marks modules as inaccessible from outside the library. But it doesn't merge with `(modules ...)` — you still need to list private modules in `(modules ...)` too.
 
+### Concurrency guarantees (non-blocking, linearizable, lock-free)
+
+Non-blocking operations in picos are **strictly linearizable** (linearizable + serializable). Lock-free operations avoid competing operations of widely different complexities to reduce starvation.
+
+```
+Wait-free  → EVERY thread finishes in bounded steps     (strongest)
+Lock-free  → AT LEAST ONE thread makes progress          (picos default for writes)
+```
+
+- **Linearizable** = operation appears to happen at a single instant. Concurrent ops behave as if sequential.
+- **Lock-free** = global progress guaranteed (if your CAS fails, someone else succeeded), but individual threads may retry.
+- **Starvation mitigation** = picos designs competing operations to do similar work, so cheap O(1) ops don't starve expensive O(n) ones during CAS contention.
+- In `picos_aux.htbl`: reads are **wait-free**, writes are **lock-free**, resize is cooperative across threads.
+
 ### The main module file (`name.ml`)
 
 ### With a `name.ml` file — you control the public API
