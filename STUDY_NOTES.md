@@ -300,6 +300,56 @@ Between steps 3 and 5, the fiber belongs to nobody — it's a suspended continua
 
 In practice, most fibers stay on one scheduler. But shallow handlers make the design **open** — which is the whole point of picos as an interop layer.
 
+### Trigger: the wake-up mechanism
+
+A trigger is a **one-shot doorbell**. Three states: `Initial → Awaiting → Signaled` (never goes back).
+
+- **Does not carry a result.** It just says "wake up." The fiber checks the shared data structure itself after waking.
+- **Idempotent signaling.** `Trigger.signal` on an already-signaled trigger is a no-op. No explosion risk from concurrent signals.
+- **Put in data structures** so other fibers know where to signal. E.g., mutex keeps a queue of triggers — unlock pops one and signals it.
+- **Attached to computations** for cancellation: if the computation is canceled, all attached triggers fire, waking all suspended fibers.
+
+```
+Mutex wait queue: [ trigger_A ; trigger_B ; trigger_C ]
+                        ↑ signal this one → fiber A wakes up
+```
+
+After `await` returns, the fiber must clean up (remove trigger from data structure, detach from computation). Both the normal and canceled paths must do this.
+
+### Computation: the cancellation unit
+
+A computation is **not** the code — it's the **status box** for some work:
+
+```
+Running  { triggers: Trigger.t list }   ← work in progress, observers attached
+Returned { value: 'a }                  ← completed successfully
+Canceled { exn; bt }                    ← failed or externally canceled
+```
+
+Key properties:
+
+- **Many fibers, one computation**: a parallel map spawns 4 fibers sharing one computation. Cancel it → all 4 stop.
+- **One fiber, many computations**: `Flock.join_after` swaps the fiber's computation to the flock's, then back when done. Nesting = stacking computations.
+- **Not hierarchical by itself**, but `Computation.attach_canceler ~from:parent ~into:child` chains them: canceling parent triggers a special trigger whose action cancels child. This cascades through the tree.
+- **`Computation.check`**: polls cancellation status, raises if canceled. Called internally by sync primitives (mutex, semaphore) at suspension points. End users only need it in tight CPU loops with no effects.
+- **`Computation.capture comp f x`**: runs `f x`, stores the result (or exception) in `comp`. Convenience for "run and complete."
+
+### `type !'a t` — injectivity annotation
+
+The `!` means the type parameter is **injective**: `int t ≠ string t` is guaranteed. Needed because the computation actually stores a value of type `'a` inside. Without `!`, certain GADT refinements and pattern matches wouldn't typecheck. Almost always correct for abstract types that use their parameter.
+
+### Private effects
+
+```ocaml
+type _ Effect.t += private | Await : t -> (exn * bt) option Effect.t
+```
+
+`private` on an extensible variant: **you can match on it, but you can't construct it.**
+
+- Schedulers can handle `Await` in their effect handler (pattern match: OK)
+- Only picos itself can `Effect.perform (Await trigger)` (construction: only internal)
+- Forces everyone to go through the public API (`Trigger.await`, `Fiber.spawn`, etc.) which does bookkeeping before/after performing the effect
+
 ---
 
 ## OCaml 5 concurrency model

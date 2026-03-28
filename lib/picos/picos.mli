@@ -359,6 +359,9 @@ module Trigger : sig
       @raise Invalid_argument if the trigger was in the awaiting state. *)
 
   include Intf.Trigger with type t := t
+  (* THIS is what the include brought in: *)
+    (* type _ Effect.t += private
+      | Await : t -> (exn * Printexc.raw_backtrace) option Effect.t *)
 
   (** {2 Design rationale}
 
