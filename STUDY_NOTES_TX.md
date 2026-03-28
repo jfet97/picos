@@ -148,6 +148,8 @@ A linked list of "I changed computation X, and before my change it was in state 
 
 Used for rollback: walk the list, restore each computation to its `before` state.
 
+Note the **polymorphic variants** (`` `Nil ``, `` `Completion ``) as GADT parameters instead of a regular sum type. `[> `Nil]` means "at least `` `Nil ``, possibly more tags" — this gives width subtyping so both `Nil` and `Completion` are compatible with the mutable field typed `[`Nil | `Completion] completions`. Without `>`, types would be rigid and couldn't coexist in the same field. Polymorphic variants avoid declaring a separate tag type.
+
 Example after a transaction tentatively completed comp_a and comp_b:
 
 ```
