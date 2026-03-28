@@ -18,7 +18,8 @@ Source: `lib/picos/picos.ocaml5.ml`, lines 75–209.
 8. [Full trace: two domains racing](#8-full-trace-two-domains-racing)
 9. [Overlapping transactions](#9-overlapping-transactions)
 10. [Obstruction-freedom](#10-obstruction-freedom)
-11. [Who uses Tx in practice?](#11-who-uses-tx-in-practice)
+11. [How cancellation ACTUALLY works (no Tx involved)](#11-how-cancellation-actually-works-no-tx-involved)
+12. [Who uses Tx in practice?](#12-who-uses-tx-in-practice)
 
 ---
 
@@ -367,6 +368,10 @@ tx1's rollback runs:
 
 Each transaction only cleans up its own completions. The `tx` pointer acts as an ownership tag.
 
+### Rollback is best-effort per item, but always completes the full list
+
+Notice: every result in the rollback loop is ignored (`|> ignore`, `-> ()`), and it **unconditionally** proceeds to `rollback tx r.completions`. If mid-rollback someone permanently completes a computation via plain `try_cancel` (with `tx=Stopped`), the rollback sees `tx != previous_tx` (or `Continue` if already rolled back by someone else), skips it, and keeps going. Rollback never stops, never fails, never blocks. It's a cleanup pass, not a transaction that must fully succeed.
+
 ### Why this is safe under preemption
 
 What if `tx == previous_tx` evaluates to `true`, then the thread gets preempted, and by the time it resumes the computation now belongs to a different transaction?
@@ -696,7 +701,68 @@ The `tx` field is already "free" in terms of memory (it's just a pointer, `Stopp
 
 ---
 
-## 11. Who uses Tx in practice?
+## 11. How cancellation ACTUALLY works (no Tx involved)
+
+A common misconception: "canceling multiple fibers needs transactions." It doesn't. Picos uses **trigger-based cascading**, which is completely separate from `Tx`.
+
+### The mechanism: `attach_canceler`
+
+```ocaml
+(* picos.ocaml5.ml *)
+let propagate _ from into =
+  match Atomic.get from with
+  | S (Canceled _ as after) -> try_terminate into (S after) Backoff.default |> ignore
+  | _ -> ()
+
+let canceler ~from ~into = Trigger.from_action from into propagate
+let attach_canceler ~from ~into =
+  let canceler = canceler ~from ~into in
+  if try_attach from canceler then canceler else error_returned (check from)
+```
+
+`attach_canceler` creates a trigger whose action is "if parent cancels, cancel child too." This trigger is attached to the parent's trigger list. When the parent is canceled, all its triggers fire, including cancelers — which in turn cancel children.
+
+### Example: Bundle with 3 children
+
+```
+Bundle computation (Continue, triggers = [canceler_a, canceler_b, canceler_c])
+  ├── canceler_a → propagate → Child A computation
+  ├── canceler_b → propagate → Child B computation
+  └── canceler_c → propagate → Child C computation
+```
+
+When someone calls `Computation.try_cancel bundle exn bt`:
+
+```
+1. CAS bundle: Continue{triggers=[ca, cb, cc]} → Canceled{tx=Stopped, exn, bt}
+2. signal: Trigger.signal ca → propagate → try_terminate child_a (Canceled{tx=Stopped})
+3. signal: Trigger.signal cb → propagate → try_terminate child_b (Canceled{tx=Stopped})
+4. signal: Trigger.signal cc → propagate → try_terminate child_c (Canceled{tx=Stopped})
+```
+
+**Every single step uses `tx = Stopped`.** Each is an independent, irreversible `try_terminate`. No transactions. No rollback.
+
+### Why this doesn't need atomicity
+
+"But what if child_a's cancel succeeds and child_b's fails?" — that can only happen if child_b **already completed** (returned or was already canceled). That's fine. You don't need to undo child_a's cancellation because child_b finished first. Each child is independent.
+
+This is different from the `Tx` scenario ("return comp_a AND cancel comp_b as one atomic operation"). With cascading cancellation, the semantics are "cancel everything you can, ignore what's already done."
+
+### Can `try_attach` undo a cancellation?
+
+**No, not in normal usage.** A plain `try_cancel` sets `tx = Stopped` immediately. When `try_attach` encounters it:
+
+```ocaml
+| S (Canceled { tx; _ }) ->
+    Tx.try_abort tx && try_attach t trigger backoff
+    (*  tx = Stopped → try_abort returns false → try_attach returns false *)
+```
+
+`try_attach` can only abort a cancellation that was done via `Tx.try_cancel` with an uncommitted transaction. Since nobody in production uses `Tx`, this never happens. Plain cancellations are permanent and irreversible.
+
+---
+
+## 12. Who uses Tx in practice?
 
 ### Explicit `Tx.create()` usage: NOBODY in production
 
@@ -706,8 +772,6 @@ Searching the entire picos codebase, `Tx.create` / `Tx.try_return` / `Tx.try_com
 - Any sync primitive (mutex, condition, semaphore)
 - Any scheduler
 - Any I/O module
-
-Bundle/Flock use `Computation.attach_canceler` for cascading cancellation — which is a trigger-based mechanism, not transactional.
 
 ### Implicit `tx` field usage: EVERYWHERE
 
@@ -725,7 +789,8 @@ So while `Tx` the API is rarely used, `tx` the field is **load-bearing infrastru
 
 - You will use `Computation.try_return` and `Computation.try_cancel` (single-computation, lock-free, `tx=Stopped`).
 - You will NOT use `Computation.Tx` unless you find a specific race condition that requires atomic multi-completion.
-- But you should understand the `tx` field because it explains why reader functions behave the way they do.
+- The `tx` field explains why reader functions check `tx == Stopped` — it's the "is this final?" guard.
+- Cancellation cascading uses triggers, not transactions. Each cancellation in the cascade is independent and irreversible.
 
 ---
 
