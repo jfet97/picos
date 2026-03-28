@@ -79,6 +79,55 @@ Everything else in the directory is invisible to the compiler — those files ar
 
 Also useful: **`(private_modules <modules>)`** marks modules as inaccessible from outside the library. But it doesn't merge with `(modules ...)` — you still need to list private modules in `(modules ...)` too.
 
+### CAS (Compare-And-Swap): the foundation of lock-free programming
+
+CAS is a single hardware instruction that atomically does:
+
+```
+CAS(cell, expected, new_value):
+  if cell.value == expected then
+    cell.value <- new_value; return true
+  else
+    return false
+```
+
+"If the cell still has what I expect, swap it. Otherwise fail." The CPU guarantees no one can interfere mid-operation.
+
+**Why it's always in a loop**: CAS can fail if another thread modified the cell between your read and your CAS. So you retry:
+
+```ocaml
+let rec increment cell =
+  let old = Atomic.get cell in
+  if not (Atomic.compare_and_set cell old (old + 1))
+  then increment cell  (* someone else changed it, retry with fresh value *)
+```
+
+This is **optimistic concurrency**: assume no contention, try, retry if wrong. With backoff to reduce contention:
+
+```ocaml
+let rec loop backoff =
+  let before = Atomic.get t in
+  let after = compute before in
+  if Atomic.compare_and_set t before after then ()
+  else loop (Backoff.once backoff)  (* wait a bit longer each retry *)
+```
+
+**CAS vs locks**:
+
+| | Lock | CAS loop |
+|---|---|---|
+| Thread preempted mid-operation | Everyone waits (deadlock risk) | No effect — CAS fails, others proceed |
+| Progress guarantee | None if holder dies | Lock-free: at least one thread always progresses |
+| Atomic update of ONE cell | Overkill | Perfect fit |
+| Atomic update of TWO+ cells | Easy (hold the lock) | Hard — need protocols like `Computation.Tx` |
+| Waiting for a condition | `Mutex + Condition.wait` | Need a separate mechanism (Trigger in picos) |
+
+**CAS limitation**: atomic on ONE cell only. For multi-cell updates, either pack state into one cell, use a multi-word CAS protocol (like `Tx`), or use a lock.
+
+**In picos**: CAS handles state transitions (computation states, trigger states, sync primitive state). Triggers handle suspension/wakeup (fiber sleeps until signaled). Together they replace `Mutex + Condition`.
+
+**CAS in OCaml vs C++**: in C++, CAS operates on the raw bytes — limited to word-sized data (ints, booleans, pointers). In OCaml, everything is either an unboxed int or a pointer to a heap object. So `Atomic.compare_and_set` always swaps one machine word (a pointer), regardless of how complex the value is. You're never CAS-ing a struct — you're CAS-ing a pointer to a struct. The tradeoff: every state transition allocates a new heap object (the old one becomes garbage).
+
 ### Concurrency guarantees (non-blocking, linearizable, lock-free)
 
 Non-blocking operations in picos are **strictly linearizable** (linearizable + serializable). Lock-free operations avoid competing operations of widely different complexities to reduce starvation.
